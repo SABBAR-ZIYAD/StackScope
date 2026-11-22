@@ -13,7 +13,10 @@ from dotenv import load_dotenv
 
 from github_ecosystem_miner.config import CollectionConfig
 from github_ecosystem_miner.errors import CollectionError, TransientCollectionError
+from github_ecosystem_miner.progress import get_logger
 from github_ecosystem_miner.rate_limits import RateLimitManager
+
+LOGGER = get_logger("github_client")
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,7 @@ class GitHubClient:
         )
         delay = self.last_search_request + interval - time.time()
         if delay > 0:
+            LOGGER.debug("[search] Pacing request for %.2f seconds", delay)
             time.sleep(delay)
         self.last_search_request = time.time()
 
@@ -205,6 +209,11 @@ class GitHubClient:
                         "bytes_transferred": 0,
                         "error": last_error,
                     }
+                )
+                LOGGER.warning(
+                    "[github] Network error on %s; retrying in %.1f seconds",
+                    endpoint,
+                    delay,
                 )
                 time.sleep(delay)
                 continue
@@ -267,6 +276,11 @@ class GitHubClient:
             log_row["error"] = decision.reason
             self._log(log_row)
             if decision.action == "wait_reset":
+                LOGGER.warning(
+                    "[github] %s budget exhausted for %s; rotating token or waiting for reset",
+                    resource,
+                    endpoint,
+                )
                 self.rate_limits.mark_primary_exhausted(
                     self.token_index, resource, decision.reset_epoch
                 )
@@ -276,6 +290,12 @@ class GitHubClient:
             if decision.action == "wait":
                 if decision.reason in {"secondary_rate_limit", "retry_after"}:
                     self.rate_limits.mark_secondary_limit(decision.delay_seconds)
+                LOGGER.warning(
+                    "[github] Retrying %s in %.1f seconds (%s)",
+                    endpoint,
+                    decision.delay_seconds,
+                    decision.reason,
+                )
                 time.sleep(decision.delay_seconds + random.uniform(0, 0.5))
                 continue
             raise CollectionError(

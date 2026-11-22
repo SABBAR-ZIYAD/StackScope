@@ -9,9 +9,12 @@ from typing import Any
 
 from github_ecosystem_miner.errors import CollectionError, TransientCollectionError
 from github_ecosystem_miner.github_client import GitHubClient
+from github_ecosystem_miner.progress import get_logger, progress_message
 from github_ecosystem_miner.retrieval import discover_tree, retrieve_relevant_files
 from github_ecosystem_miner.runs import RunContext
 from github_ecosystem_miner.storage import connect
+
+LOGGER = get_logger("collection")
 
 
 def build_search_query(base_query: str, star_min: int, star_max: int) -> str:
@@ -57,6 +60,7 @@ def _api_logger(context: RunContext):
 
 def collect_search(context: RunContext, client: GitHubClient | None = None) -> int:
     context.update_stage("search", "running")
+    LOGGER.info("[search] Starting repository discovery for run %s", context.run_id)
     owns_client = client is None
     active_client = client or GitHubClient.from_environment(
         context.config.collection, logger=_api_logger(context)
@@ -69,6 +73,7 @@ def collect_search(context: RunContext, client: GitHubClient | None = None) -> i
                 "SELECT COUNT(*) FROM repositories WHERE run_id = ?", [context.run_id]
             ).fetchone()[0]
         context.update_stage("search", "complete", row_count=count)
+        LOGGER.info("[search] Complete: %,d unique repositories", count)
         return count
     except Exception as error:
         context.update_stage("search", "failed", message=str(error))
@@ -97,12 +102,19 @@ def _collect_base_query(context: RunContext, client: GitHubClient, base_query: s
             continue
 
         query = build_search_query(base_query, star_min, star_max)
+        LOGGER.info("[search] Counting slice: stars %s..%s", star_min, star_max)
         count_body = client.rest_get(
             "/search/repositories", params={"q": query, "per_page": 1}, resource="search"
         )
         if count_body is None:
             raise CollectionError(f"Search count unexpectedly returned no data: {query}")
         total = int(count_body.get("total_count", 0))
+        LOGGER.info(
+            "[search] Slice stars %s..%s contains %,d repositories",
+            star_min,
+            star_max,
+            total,
+        )
         if count_body.get("incomplete_results"):
             raise CollectionError(f"GitHub returned incomplete results while counting: {query}")
         _upsert_slice(context, base_query, star_min, star_max, total, 0, "counted")
@@ -115,6 +127,11 @@ def _collect_base_query(context: RunContext, client: GitHubClient, base_query: s
                     f"{base_query}. Add another qualifier to make the sample complete."
                 )
             lower, upper = split_star_range(star_min, star_max)
+            LOGGER.info(
+                "[search] Splitting oversized slice into %s..%s and %s..%s",
+                *lower,
+                *upper,
+            )
             stack.append(upper)
             stack.append(lower)
             continue
@@ -177,6 +194,14 @@ def _fetch_slice(
             for item in items:
                 _upsert_repository(connection, context.run_id, item, base_query)
         fetched += len(items)
+        LOGGER.info(
+            "[search] Page %d/%d: received %d repositories; slice progress %,d/%,d",
+            page,
+            pages,
+            len(items),
+            min(fetched, total),
+            total,
+        )
         _upsert_slice(context, base_query, star_min, star_max, total, fetched, "fetching")
         if len(items) < per_page:
             break
@@ -330,6 +355,7 @@ def collect_enrichment(
     context: RunContext, client: GitHubClient | None = None, *, refresh: bool = False
 ) -> int:
     context.update_stage("enrich", "running")
+    LOGGER.info("[enrich] Loading repositories that still need enrichment")
     owns_client = client is None
     active_client = client or GitHubClient.from_environment(
         context.config.collection, logger=_api_logger(context)
@@ -349,9 +375,21 @@ def collect_enrichment(
                 [context.run_id, refresh],
             ).fetchall()
         strategy = _select_strategy(context, active_client, len(pending))
+        LOGGER.info(
+            "[enrich] Strategy: %s | pending repositories: %,d",
+            strategy,
+            len(pending),
+        )
         batch_size = context.config.collection.graphql_batch_size
+        processed = 0
         for index in range(0, len(pending), batch_size):
             chunk = pending[index : index + batch_size]
+            LOGGER.info(
+                "[enrich] Processing batch %d-%d of %,d",
+                index + 1,
+                index + len(chunk),
+                len(pending),
+            )
             snapshots: dict[int, RepositorySnapshot] = {}
             graphql_errors: dict[int, list[dict[str, Any]]] = {}
             if strategy == "hybrid":
@@ -359,6 +397,9 @@ def collect_enrichment(
                     snapshots, graphql_errors = _graphql_snapshots(active_client, chunk)
                 except (CollectionError, TransientCollectionError):
                     # A GraphQL outage must not stop a resumable run. REST is slower but complete.
+                    LOGGER.warning(
+                        "[enrich] GraphQL batch failed; falling back to REST for this batch"
+                    )
                     snapshots = {}
 
             for row in chunk:
@@ -382,6 +423,13 @@ def collect_enrichment(
                             str(error),
                             graphql_errors.get(repository_id),
                         )
+                        processed += 1
+                        if processed == len(pending) or processed % 10 == 0:
+                            LOGGER.info(
+                                progress_message(
+                                    "enrich", processed, len(pending), f"failed: {full_name}"
+                                )
+                            )
                         continue
                 try:
                     _enrich_snapshot(context, active_client, snapshot, int(size_kb or 0))
@@ -394,6 +442,11 @@ def collect_enrichment(
                         str(error),
                         graphql_errors.get(repository_id),
                     )
+                processed += 1
+                if processed == len(pending) or processed % 10 == 0:
+                    LOGGER.info(
+                        progress_message("enrich", processed, len(pending), str(full_name))
+                    )
 
         with connect(context.database_path, read_only=True) as connection:
             count = connection.execute(
@@ -401,6 +454,7 @@ def collect_enrichment(
                 [context.run_id],
             ).fetchone()[0]
         context.update_stage("enrich", "complete", row_count=count)
+        LOGGER.info("[enrich] Complete: %,d repositories enriched", count)
         return count
     except Exception as error:
         context.update_stage("enrich", "failed", message=str(error))

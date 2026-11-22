@@ -11,8 +11,11 @@ import pandas as pd
 from mlxtend.frequent_patterns import association_rules, fpgrowth
 
 from github_ecosystem_miner.errors import DataValidationError
+from github_ecosystem_miner.progress import get_logger
 from github_ecosystem_miner.runs import RunContext
 from github_ecosystem_miner.storage import connect
+
+LOGGER = get_logger("association")
 
 FAMILY_PREFIXES = (
     "torch",
@@ -33,6 +36,7 @@ FAMILY_PREFIXES = (
 
 def mine_association_rules(context: RunContext) -> dict[str, int]:
     context.update_stage("mine_rules", "running")
+    LOGGER.info("[mine-rules] Building repository-technology baskets")
     try:
         basket = _load_basket(context)
         if basket.empty or basket.shape[0] < 2:
@@ -45,7 +49,17 @@ def mine_association_rules(context: RunContext) -> dict[str, int]:
         if basket.shape[1] < 2:
             raise DataValidationError("Fewer than two technologies meet minimum_item_support")
 
+        LOGGER.info(
+            "[mine-rules] Matrix: %,d repositories × %,d technologies",
+            len(basket),
+            basket.shape[1],
+        )
+        LOGGER.info("[mine-rules] Evaluating support thresholds with FP-Growth")
         threshold_rows = _evaluate_thresholds(context, basket)
+        LOGGER.info(
+            "[mine-rules] Mining itemsets at %.3f minimum support",
+            context.config.mining.minimum_support,
+        )
         frequent = fpgrowth(
             basket,
             min_support=context.config.mining.minimum_support,
@@ -82,6 +96,12 @@ def mine_association_rules(context: RunContext) -> dict[str, int]:
         }
         context.update_stage(
             "mine_rules", "complete", row_count=result["rules"], message=json.dumps(result)
+        )
+        LOGGER.info(
+            "[mine-rules] Complete: %,d itemsets, %,d rules, %,d communities",
+            len(frequent),
+            len(rules),
+            communities,
         )
         return result
     except Exception as error:

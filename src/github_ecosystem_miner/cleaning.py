@@ -8,8 +8,11 @@ from typing import Any
 
 from github_ecosystem_miner.normalization import normalize_package
 from github_ecosystem_miner.parsers import PARSERS, looks_frozen_requirements
+from github_ecosystem_miner.progress import get_logger, progress_message
 from github_ecosystem_miner.runs import RunContext
 from github_ecosystem_miner.storage import connect
+
+LOGGER = get_logger("cleaning")
 
 RESOURCE_PATTERN = re.compile(
     r"\b(awesome|tutorials?|courses?|cheat.?sheets?|roadmap|interviews?|internships?|"
@@ -68,6 +71,7 @@ def is_resource_repository(name: str, description: str | None) -> bool:
 
 def clean_run(context: RunContext) -> dict[str, int]:
     context.update_stage("clean", "running")
+    LOGGER.info("[clean] Parsing and normalizing technology evidence")
     try:
         with connect(context.database_path) as connection:
             connection.execute("DELETE FROM technology_evidence WHERE run_id = ?", [context.run_id])
@@ -88,7 +92,8 @@ def clean_run(context: RunContext) -> dict[str, int]:
 
             kept_count = 0
             evidence_count = 0
-            for row in rows:
+            LOGGER.info("[clean] Repositories to process: %,d", len(rows))
+            for position, row in enumerate(rows, start=1):
                 repository_id, name, description = int(row[0]), row[1], row[2]
                 languages = json.loads(row[3] or "{}")
                 root_files = json.loads(row[4] or "[]")
@@ -194,6 +199,12 @@ def clean_run(context: RunContext) -> dict[str, int]:
                 )
                 kept_count += int(kept)
                 evidence_count += len(evidence)
+                if position == len(rows) or position % 50 == 0:
+                    LOGGER.info(
+                        progress_message(
+                            "clean", position, len(rows), f"kept {kept_count:,}"
+                        )
+                    )
 
         result = {
             "repositories_enriched": len(rows),
@@ -201,6 +212,11 @@ def clean_run(context: RunContext) -> dict[str, int]:
             "evidence_rows": evidence_count,
         }
         context.update_stage("clean", "complete", row_count=kept_count, message=json.dumps(result))
+        LOGGER.info(
+            "[clean] Complete: %,d kept repositories and %,d evidence rows",
+            kept_count,
+            evidence_count,
+        )
         return result
     except Exception as error:
         context.update_stage("clean", "failed", message=str(error))

@@ -4,6 +4,7 @@ import hashlib
 import importlib.metadata
 import json
 import platform
+import re
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -14,9 +15,31 @@ from github_ecosystem_miner.config import AppConfig
 from github_ecosystem_miner.errors import RunError
 from github_ecosystem_miner.storage import connect, initialize_database
 
+RUN_NAME_PATTERN = re.compile(r"[^a-z0-9]+")
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _run_slug(config: AppConfig, requested_name: str | None) -> str:
+    source = requested_name or config.ecosystem.queries[0]
+    topic = re.search(r"\btopic:([^\s]+)", source, re.IGNORECASE)
+    language = re.search(r"\blanguage:([^\s]+)", source, re.IGNORECASE)
+    if requested_name is None:
+        if topic:
+            source = f"{topic.group(1)}-ecosystem"
+        elif language:
+            source = f"{language.group(1)}-ecosystem"
+        else:
+            source = "github-ecosystem"
+    slug = RUN_NAME_PATTERN.sub("-", source.lower()).strip("-")
+    return (slug or "github-ecosystem")[:48].rstrip("-")
+
+
+def default_run_id(config: AppConfig, run_name: str | None = None) -> str:
+    local_timestamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+    return f"{local_timestamp}_{_run_slug(config, run_name)}_{config.fingerprint[:8]}"
 
 
 def _git_commit(project_root: Path) -> str | None:
@@ -133,10 +156,13 @@ class RunContext:
 
 
 def create_run(
-    project_root: str | Path, config: AppConfig, run_id: str | None = None
+    project_root: str | Path,
+    config: AppConfig,
+    run_id: str | None = None,
+    run_name: str | None = None,
 ) -> RunContext:
     root = Path(project_root).resolve()
-    base_id = run_id or f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{config.fingerprint[:8]}"
+    base_id = run_id or default_run_id(config, run_name)
     run_dir = root / "data" / "runs" / base_id
     if run_dir.exists():
         raise RunError(f"Run already exists: {base_id}")
@@ -149,6 +175,7 @@ def create_run(
     manifest = {
         "schema_version": 1,
         "run_id": base_id,
+        "run_name": _run_slug(config, run_name),
         "status": "created",
         "created_at": created_at,
         "updated_at": created_at,

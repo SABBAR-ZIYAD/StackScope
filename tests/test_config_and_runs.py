@@ -7,7 +7,7 @@ import duckdb
 
 from github_ecosystem_miner.config import AppConfig, EcosystemConfig, load_config
 from github_ecosystem_miner.errors import ConfigurationError, RunError
-from github_ecosystem_miner.runs import create_run, load_run
+from github_ecosystem_miner.runs import create_run, default_run_id, load_run
 from github_ecosystem_miner.storage import initialize_database
 
 
@@ -28,6 +28,16 @@ class TestConfiguration(unittest.TestCase):
 
 
 class TestRuns(unittest.TestCase):
+    def test_default_run_id_is_readable_and_named(self):
+        config = AppConfig()
+        generated = default_run_id(config, "Machine Learning Study")
+        self.assertRegex(
+            generated,
+            r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_machine-learning-study_[0-9a-f]{8}$",
+        )
+        derived = default_run_id(config)
+        self.assertIn("webapp-ecosystem", derived)
+
     def test_run_is_isolated_and_configuration_locked(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

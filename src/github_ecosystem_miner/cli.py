@@ -13,10 +13,13 @@ from github_ecosystem_miner.collection import collect_enrichment, collect_search
 from github_ecosystem_miner.config import load_config
 from github_ecosystem_miner.errors import MinerError
 from github_ecosystem_miner.github_client import GitHubClient
+from github_ecosystem_miner.progress import configure_logging, get_logger
 from github_ecosystem_miner.reporting import export_run, generate_report
 from github_ecosystem_miner.robustness import analyze_robustness
 from github_ecosystem_miner.runs import create_run, list_runs, load_run
 from github_ecosystem_miner.storage import connect
+
+LOGGER = get_logger("cli")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,12 +35,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config", type=Path, default=Path("config.toml"), help="TOML configuration file"
     )
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+        help="Terminal logging detail (default: INFO)",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     run = commands.add_parser("run", help="Create, list, or inspect isolated runs")
     run_commands = run.add_subparsers(dest="run_command", required=True)
     create = run_commands.add_parser("create", help="Create a run from the current configuration")
     create.add_argument("--run-id", help="Optional explicit run ID")
+    create.add_argument(
+        "--name", help="Readable study name included in the generated run folder"
+    )
     run_commands.add_parser("list", help="List local runs")
     status = run_commands.add_parser("status", help="Show a run manifest and row counts")
     status.add_argument("--run-id", required=True)
@@ -87,6 +99,9 @@ def build_parser() -> argparse.ArgumentParser:
         "pipeline", help="Run the complete collection, mining, analysis, and report workflow"
     )
     pipeline.add_argument("--run-id", help="Resume a run or create this explicit run ID")
+    pipeline.add_argument(
+        "--name", help="Readable study name when the pipeline creates a new run"
+    )
     return parser
 
 
@@ -136,7 +151,9 @@ def execute(args: argparse.Namespace) -> int:
     config = load_config(_config_path(root, args.config))
 
     if args.command == "run" and args.run_command == "create":
-        context = create_run(root, config, args.run_id)
+        context = create_run(root, config, args.run_id, args.name)
+        LOGGER.info("[run] Created %s", context.run_id)
+        LOGGER.info("[run] Directory: %s", context.run_dir)
         print(context.run_id)
         return 0
     if args.command == "run" and args.run_command == "list":
@@ -149,11 +166,14 @@ def execute(args: argparse.Namespace) -> int:
 
     run_id = args.run_id
     if args.command == "pipeline" and run_id is None:
-        context = create_run(root, config)
+        context = create_run(root, config, run_name=args.name)
         run_id = context.run_id
-        print(f"Created run: {run_id}")
+        LOGGER.info("[pipeline] Created run: %s", run_id)
+        LOGGER.info("[pipeline] Output directory: %s", context.run_dir)
     else:
         context = load_run(root, run_id, config)
+        if args.command == "pipeline":
+            LOGGER.info("[pipeline] Resuming run: %s", run_id)
 
     if args.command == "run" and args.run_command == "status":
         _show_status(context)
@@ -181,6 +201,7 @@ def execute(args: argparse.Namespace) -> int:
         with GitHubClient.from_environment(context.config.collection) as client:
             print(json.dumps(benchmark_collection(context, client, limit=args.limit), indent=2))
     elif args.command == "pipeline":
+        LOGGER.info("[pipeline] Starting complete workflow")
         results = {
             "run_id": run_id,
             "repositories": collect_search(context),
@@ -192,6 +213,7 @@ def execute(args: argparse.Namespace) -> int:
             "report": generate_report(context),
         }
         context.mark_complete()
+        LOGGER.info("[pipeline] Complete: %s", context.run_dir / "report.html")
         print(json.dumps(results, indent=2))
     return 0
 
@@ -199,6 +221,7 @@ def execute(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    configure_logging(args.log_level)
     try:
         raise SystemExit(execute(args))
     except MinerError as error:

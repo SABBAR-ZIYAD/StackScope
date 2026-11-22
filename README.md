@@ -111,8 +111,18 @@ sample benchmark found selective retrieval more bandwidth-efficient.
 Create an isolated run:
 
 ```powershell
-gem run create
+gem run create --name webapp-study
 ```
+
+Generated run folders are readable and sortable:
+
+```text
+2026-11-22_18-30-05_webapp-study_39e4d8b3
+```
+
+The name identifies the study, the prefix records local date/time, and the final hash identifies the
+exact configuration. Without `--name`, the CLI derives a name from the first query, such as
+`webapp-ecosystem`.
 
 Use the returned run ID for every stage:
 
@@ -148,8 +158,17 @@ cache keys, archive safeguards and benchmark interpretation. The measured sample
 To create and execute a complete run:
 
 ```powershell
-gem pipeline
+gem pipeline --name webapp-study
 ```
+
+All commands print timestamped stage and progress messages by default. For request pacing and other
+detailed diagnostics, enable debug logs:
+
+```powershell
+gem --log-level DEBUG pipeline --name webapp-study
+```
+
+Use `--log-level WARNING` for quieter output.
 
 Each run is stored under `data/runs/<RUN_ID>/`:
 

@@ -6,8 +6,11 @@ import hashlib
 import html
 import json
 
+from github_ecosystem_miner.progress import get_logger
 from github_ecosystem_miner.runs import RunContext, utc_now
 from github_ecosystem_miner.storage import connect
+
+LOGGER = get_logger("reporting")
 
 EXPORT_TABLES = (
     "search_slices",
@@ -35,6 +38,7 @@ EXPORT_TABLES = (
 
 def generate_report(context: RunContext) -> dict[str, object]:
     context.update_stage("report", "running")
+    LOGGER.info("[report] Reading recorded results from DuckDB")
     try:
         data = _report_data(context)
         report_path = context.run_dir / "report.html"
@@ -57,6 +61,7 @@ def generate_report(context: RunContext) -> dict[str, object]:
             "clusters": data["summary"]["clusters"],
         }
         context.update_stage("report", "complete", row_count=1, message=json.dumps(result))
+        LOGGER.info("[report] Complete: %s", report_path)
         return result
     except Exception as error:
         context.update_stage("report", "failed", message=str(error))
@@ -68,6 +73,7 @@ def export_run(context: RunContext, file_format: str = "parquet") -> dict[str, o
         raise ValueError("Export format must be parquet or csv")
     export_dir = context.run_dir / "exports" / file_format
     export_dir.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("[export] Writing %s tables to %s", file_format.upper(), export_dir)
     exported = []
     with connect(context.database_path) as connection:
         for table in EXPORT_TABLES:
@@ -91,6 +97,8 @@ def export_run(context: RunContext, file_format: str = "parquet") -> dict[str, o
                     [context.run_id],
                 )
             exported.append({"table": table, "rows": int(count), "path": str(path)})
+            LOGGER.info("[export] %s: %,d rows", table, count)
+    LOGGER.info("[export] Complete: %d tables", len(exported))
     return {"format": file_format, "tables": exported, "directory": str(export_dir)}
 
 

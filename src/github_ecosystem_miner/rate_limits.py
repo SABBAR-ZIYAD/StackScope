@@ -5,6 +5,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from github_ecosystem_miner.errors import CollectionError
+from github_ecosystem_miner.progress import get_logger
+
+LOGGER = get_logger("rate_limits")
 
 
 @dataclass
@@ -108,6 +111,7 @@ class RateLimitManager:
     def _wait_or_fail(self, delay: float, reason: str) -> None:
         if not self.wait_enabled:
             raise CollectionError(f"Request blocked by {reason}; retry in {delay:.0f}s")
+        LOGGER.warning("[rate-limit] Waiting %.1f seconds for %s", delay, reason)
         self.sleeper(max(0.0, delay))
 
 

@@ -15,9 +15,12 @@ from github_ecosystem_miner.collection import (
 )
 from github_ecosystem_miner.errors import CollectionError
 from github_ecosystem_miner.github_client import GitHubClient
+from github_ecosystem_miner.progress import get_logger
 from github_ecosystem_miner.retrieval import discover_tree, retrieve_relevant_files
 from github_ecosystem_miner.runs import RunContext
 from github_ecosystem_miner.storage import connect, initialize_database
+
+LOGGER = get_logger("benchmark")
 
 
 @dataclass(frozen=True)
@@ -51,10 +54,19 @@ def benchmark_collection(
         raise CollectionError("Run search before benchmarking the collection strategies")
 
     benchmark_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    results = [
-        _run_strategy(context, client, repositories, strategy)
-        for strategy in ("existing_rest_only", "optimized_rest_only", "hybrid")
-    ]
+    LOGGER.info("[benchmark] Comparing strategies on %d repositories", len(repositories))
+    results = []
+    for strategy in ("existing_rest_only", "optimized_rest_only", "hybrid"):
+        LOGGER.info("[benchmark] Running %s", strategy)
+        result = _run_strategy(context, client, repositories, strategy)
+        LOGGER.info(
+            "[benchmark] %s: %d analyzed, %d core requests, %.3f seconds",
+            strategy,
+            result.analyzed_repositories,
+            result.rest_core_requests,
+            result.wall_clock_seconds,
+        )
+        results.append(result)
     with connect(context.database_path) as connection:
         for result in results:
             connection.execute(

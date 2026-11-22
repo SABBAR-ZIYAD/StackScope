@@ -9,8 +9,11 @@ from scipy.stats import spearmanr
 
 from github_ecosystem_miner.association import _load_basket
 from github_ecosystem_miner.errors import DataValidationError
+from github_ecosystem_miner.progress import get_logger
 from github_ecosystem_miner.runs import RunContext
 from github_ecosystem_miner.storage import connect
+
+LOGGER = get_logger("robustness")
 
 TEMPORAL_CAVEAT = (
     "Cohorts use repository creation time, but technologies are observed at collection time; "
@@ -20,6 +23,7 @@ TEMPORAL_CAVEAT = (
 
 def analyze_robustness(context: RunContext) -> dict[str, object]:
     context.update_stage("robustness", "running")
+    LOGGER.info("[robustness] Starting sensitivity and stability checks")
     try:
         basket = _load_basket(context)
         if len(basket) < 3:
@@ -27,8 +31,14 @@ def analyze_robustness(context: RunContext) -> dict[str, object]:
         with connect(context.database_path) as connection:
             connection.execute("DELETE FROM robustness_results WHERE run_id = ?", [context.run_id])
             connection.execute("DELETE FROM temporal_trends WHERE run_id = ?", [context.run_id])
+        LOGGER.info(
+            "[robustness] Bootstrapping rules for %d iterations",
+            context.config.robustness.bootstrap_iterations,
+        )
         rule_result = _bootstrap_rule_stability(context, basket)
+        LOGGER.info("[robustness] Comparing support thresholds")
         threshold_result = _threshold_sensitivity(context)
+        LOGGER.info("[robustness] Measuring owner and popularity sensitivity")
         owner_result = _owner_cap_sensitivity(context, basket)
         star_result = _star_cohort_sensitivity(context, basket)
         temporal_rows = _temporal_cohorts(context, basket)
@@ -48,6 +58,7 @@ def analyze_robustness(context: RunContext) -> dict[str, object]:
         context.update_stage(
             "robustness", "complete", row_count=temporal_rows, message=json.dumps(result)
         )
+        LOGGER.info("[robustness] Complete: %,d temporal rows", temporal_rows)
         return result
     except Exception as error:
         context.update_stage("robustness", "failed", message=str(error))

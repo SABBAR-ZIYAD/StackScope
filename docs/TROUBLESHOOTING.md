@@ -24,3 +24,9 @@ kept repositories and two technologies.
 
 The report deliberately shows missing stages instead of fabricating results. Run `mine-rules`,
 `cluster` and `robustness`, then regenerate `report`.
+
+## The command looks idle
+
+Normal commands print progress at `INFO` level. Use `gem --log-level DEBUG ...` to also see request
+pacing and retry details. Check another terminal with `gem run status --run-id <ID>`; collection can
+be resumed with the same run ID after interruption.

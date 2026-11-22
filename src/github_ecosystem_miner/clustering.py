@@ -13,8 +13,11 @@ from sklearn.feature_extraction.text import TfidfTransformer
 from sklearn.metrics import adjusted_rand_score, silhouette_score
 
 from github_ecosystem_miner.errors import DataValidationError
+from github_ecosystem_miner.progress import get_logger
 from github_ecosystem_miner.runs import RunContext
 from github_ecosystem_miner.storage import connect
+
+LOGGER = get_logger("clustering")
 
 try:
     from sklearn.cluster import HDBSCAN
@@ -41,6 +44,7 @@ class Candidate:
 
 def cluster_repositories(context: RunContext) -> dict[str, object]:
     context.update_stage("cluster", "running")
+    LOGGER.info("[cluster] Loading cleaned repository features")
     try:
         basket, metadata, categories = _load_features(context)
         if len(basket) < 3 or basket.shape[1] < 2:
@@ -49,6 +53,7 @@ def cluster_repositories(context: RunContext) -> dict[str, object]:
             )
         candidates: list[Candidate] = []
         for weighting, matrix in _weighted_matrices(basket, categories).items():
+            LOGGER.info("[cluster] Evaluating %s feature weighting", weighting)
             coordinates = _reduce(matrix, context.config.clustering.svd_components)
             candidates.extend(_evaluate_models(context, coordinates, weighting))
         if not candidates:
@@ -61,6 +66,14 @@ def cluster_repositories(context: RunContext) -> dict[str, object]:
                 candidate.silhouette,
                 -candidate.cluster_count,
             ),
+        )
+        LOGGER.info(
+            "[cluster] Selected %s/%s with %d clusters (silhouette %.3f, stability %.3f)",
+            selected.method,
+            selected.weighting,
+            selected.cluster_count,
+            selected.silhouette,
+            selected.stability,
         )
         _save_evaluations(context, candidates, selected)
         profiles = _save_assignments_and_profiles(context, basket, metadata, selected)
@@ -80,6 +93,7 @@ def cluster_repositories(context: RunContext) -> dict[str, object]:
         context.update_stage(
             "cluster", "complete", row_count=selected.cluster_count, message=json.dumps(result)
         )
+        LOGGER.info("[cluster] Complete: diagnostic saved to %s", plot_path)
         return result
     except Exception as error:
         context.update_stage("cluster", "failed", message=str(error))
