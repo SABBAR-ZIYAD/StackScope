@@ -17,8 +17,31 @@ from github_ecosystem_miner.storage import connect
 
 
 class FakeGitHubClient:
-    def rest_get(self, endpoint, *, params=None, resource="core"):
+    authenticated = True
+
+    def rest_get(
+        self, endpoint, *, params=None, resource="core", allow_not_found=False
+    ):
         self.last_endpoint = endpoint
+        if endpoint.startswith("/repos/") and "/git/trees/" in endpoint:
+            return {
+                "truncated": False,
+                "tree": [
+                    {"path": "Dockerfile", "type": "blob", "sha": "docker", "size": 10},
+                    {
+                        "path": "pyproject.toml",
+                        "type": "blob",
+                        "sha": "project",
+                        "size": 55,
+                    },
+                    {
+                        "path": ".github/workflows/ci.yml",
+                        "type": "blob",
+                        "sha": "ci",
+                        "size": 10,
+                    },
+                ],
+            }
         if params["per_page"] == 1:
             return {"total_count": 2, "incomplete_results": False, "items": []}
         return {
@@ -35,31 +58,23 @@ class FakeGitHubClient:
                 # Enrichment orders pending repositories by stars descending.
                 "databaseId": 2 - index,
                 "nameWithOwner": f"owner/repo-{2 - index}",
+                "defaultBranchRef": {
+                    "target": {"oid": f"commit-{index}", "tree": {"oid": f"tree-{index}"}}
+                },
                 "languages": {
                     "edges": [
                         {"size": 900, "node": {"name": "Python"}},
                         {"size": 100, "node": {"name": "HTML"}},
                     ]
                 },
-                "root": {
-                    "entries": [
-                        {"name": "Dockerfile", "type": "blob"},
-                        {"name": "pyproject.toml", "type": "blob"},
-                    ]
-                },
-                "workflows": {"entries": [{"name": "ci.yml", "type": "blob"}]},
-                "manifest_0": None,
-                "manifest_1": {
-                    "text": '[project]\ndependencies=["fastapi", "uvicorn"]',
-                    "byteSize": 55,
-                    "oid": f"oid-{index}",
-                },
-                "manifest_2": None,
-                "manifest_3": None,
-                "manifest_4": None,
             }
         nodes["rateLimit"] = {"cost": 1, "remaining": 4999, "resetAt": "2030-01-01T00:00:00Z"}
         return {"data": nodes}
+
+    def get_bytes(self, url, **kwargs):
+        if url.endswith("pyproject.toml"):
+            return b'[project]\ndependencies=["fastapi", "uvicorn"]'
+        return b"test"
 
     @staticmethod
     def _repository(repository_id):

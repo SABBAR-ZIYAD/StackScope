@@ -1,11 +1,15 @@
 import unittest
+from unittest.mock import patch
+
+import httpx
 
 from github_ecosystem_miner.collection import (
     build_enrichment_query,
     build_search_query,
     split_star_range,
 )
-from github_ecosystem_miner.github_client import retry_decision
+from github_ecosystem_miner.config import CollectionConfig
+from github_ecosystem_miner.github_client import GitHubClient, retry_decision
 
 
 class TestSearchSlicing(unittest.TestCase):
@@ -18,13 +22,15 @@ class TestSearchSlicing(unittest.TestCase):
         self.assertEqual(lower, (100, 250))
         self.assertEqual(upper, (251, 400))
 
-    def test_graphql_batches_repositories_and_manifests(self):
+    def test_graphql_batches_only_snapshot_metadata(self):
         query = build_enrichment_query(
             ["owner/one", "owner/two"], ["requirements.txt", "pyproject.toml"]
         )
         self.assertIn("r0: repository", query)
         self.assertIn("r1: repository", query)
-        self.assertIn("HEAD:requirements.txt", query)
+        self.assertIn("defaultBranchRef", query)
+        self.assertIn("languages(first: 100", query)
+        self.assertNotIn("HEAD:requirements.txt", query)
         self.assertIn("rateLimit", query)
 
 
@@ -50,6 +56,25 @@ class TestRetryDecision(unittest.TestCase):
         second = retry_decision(502, {}, "bad gateway", 1)
         self.assertEqual(first.action, "wait")
         self.assertGreater(second.delay_seconds, first.delay_seconds)
+
+    def test_client_retries_transient_server_error(self):
+        attempts = []
+
+        def handler(request):
+            attempts.append(request)
+            if len(attempts) == 1:
+                return httpx.Response(502, text="bad gateway")
+            return httpx.Response(200, json={"ok": True})
+
+        client = GitHubClient(
+            CollectionConfig(max_retries=2), transport=httpx.MockTransport(handler)
+        )
+        try:
+            with patch("github_ecosystem_miner.github_client.time.sleep"):
+                self.assertEqual(client.rest_get("/test"), {"ok": True})
+        finally:
+            client.close()
+        self.assertEqual(len(attempts), 2)
 
 
 if __name__ == "__main__":
