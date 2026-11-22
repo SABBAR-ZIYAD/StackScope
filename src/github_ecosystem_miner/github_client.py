@@ -5,7 +5,7 @@ import random
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 from github_ecosystem_miner.config import CollectionConfig
 from github_ecosystem_miner.errors import CollectionError, TransientCollectionError
+from github_ecosystem_miner.rate_limits import RateLimitManager
 
 
 @dataclass(frozen=True)
@@ -86,14 +87,23 @@ class GitHubClient:
         self.client = httpx.Client(
             timeout=config.request_timeout_seconds,
             transport=transport,
+            follow_redirects=True,
             headers={
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "github-ecosystem-miner/0.2",
+                "User-Agent": "stackscope/0.3",
             },
         )
         self.last_search_request = 0.0
-        self.exhausted_until: dict[tuple[int, str], float] = {}
+        self.rate_limits = RateLimitManager(
+            len(self.tokens),
+            reserves={
+                "core": config.core_rate_reserve,
+                "search": config.search_rate_reserve,
+                "graphql": config.graphql_rate_reserve,
+            },
+            wait_enabled=config.wait_for_rate_limit,
+        )
 
     @classmethod
     def from_environment(
@@ -128,18 +138,11 @@ class GitHubClient:
             self.logger(row)
 
     def _choose_available_token(self, resource: str) -> None:
-        now = time.time()
         for _ in range(len(self.tokens)):
-            if self.exhausted_until.get((self.token_index, resource), 0) <= now:
+            if self.rate_limits.token_available(self.token_index, resource):
                 return
             self.token_index = (self.token_index + 1) % len(self.tokens)
-        earliest = min(self.exhausted_until[(index, resource)] for index in range(len(self.tokens)))
-        if not self.config.wait_for_rate_limit:
-            raise CollectionError(
-                f"All tokens are rate-limited for {resource} until "
-                f"{datetime.fromtimestamp(earliest, UTC).isoformat()}"
-            )
-        time.sleep(max(0.0, earliest - now) + 2.0)
+        self.rate_limits.before_request(self.token_index, resource)
 
     def _pace_search(self) -> None:
         interval = (
@@ -162,10 +165,14 @@ class GitHubClient:
         endpoint: str,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+        response_kind: str = "json",
+        allow_not_found: bool = False,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any] | bytes | None:
         last_error = "unknown failure"
         for attempt in range(self.config.max_retries):
             self._choose_available_token(resource)
+            self.rate_limits.before_request(self.token_index, resource)
             if resource == "search":
                 self._pace_search()
             started = time.perf_counter()
@@ -177,7 +184,7 @@ class GitHubClient:
                     url,
                     params=params,
                     json=json_body,
-                    headers=self._headers(),
+                    headers={**self._headers(), **(extra_headers or {})},
                 )
                 status = response.status_code
             except httpx.RequestError as error:
@@ -186,6 +193,7 @@ class GitHubClient:
                 self._log(
                     {
                         "api": api,
+                        "resource": resource,
                         "endpoint": endpoint,
                         "status": None,
                         "duration_ms": (time.perf_counter() - started) * 1000,
@@ -194,6 +202,7 @@ class GitHubClient:
                         "remaining": None,
                         "reset_at": None,
                         "graphql_cost": None,
+                        "bytes_transferred": 0,
                         "error": last_error,
                     }
                 )
@@ -203,8 +212,10 @@ class GitHubClient:
             duration_ms = (time.perf_counter() - started) * 1000
             remaining = _int_header(response.headers, "x-ratelimit-remaining")
             reset_at = _int_header(response.headers, "x-ratelimit-reset")
+            self.rate_limits.observe_headers(self.token_index, resource, response.headers)
             log_row = {
                 "api": api,
+                "resource": resource,
                 "endpoint": endpoint,
                 "status": status,
                 "duration_ms": duration_ms,
@@ -213,10 +224,14 @@ class GitHubClient:
                 "remaining": remaining,
                 "reset_at": reset_at,
                 "graphql_cost": None,
+                "bytes_transferred": len(response.content),
                 "error": None,
             }
 
             if status == 200:
+                if response_kind == "bytes":
+                    self._log(log_row)
+                    return response.content
                 try:
                     body = response.json()
                 except ValueError as error:
@@ -234,21 +249,33 @@ class GitHubClient:
                     rate = (body.get("data") or {}).get("rateLimit") or {}
                     log_row["remaining"] = rate.get("remaining", remaining)
                     log_row["graphql_cost"] = rate.get("cost")
+                    self.rate_limits.observe_graphql(
+                        self.token_index,
+                        remaining=rate.get("remaining"),
+                        reset_epoch=_iso_epoch(rate.get("resetAt")),
+                    )
                 self._log(log_row)
-                if remaining == 0 and reset_at:
-                    self.exhausted_until[(self.token_index, resource)] = float(reset_at)
                 return body
+
+            if status == 404 and allow_not_found:
+                log_row["error"] = "not_found"
+                self._log(log_row)
+                return None
 
             decision = retry_decision(status, response.headers, response.text, attempt)
             last_error = decision.reason
             log_row["error"] = decision.reason
             self._log(log_row)
             if decision.action == "wait_reset":
-                self.exhausted_until[(self.token_index, resource)] = decision.reset_epoch
+                self.rate_limits.mark_primary_exhausted(
+                    self.token_index, resource, decision.reset_epoch
+                )
                 if len(self.tokens) > 1:
                     self.token_index = (self.token_index + 1) % len(self.tokens)
                 continue
             if decision.action == "wait":
+                if decision.reason in {"secondary_rate_limit", "retry_after"}:
+                    self.rate_limits.mark_secondary_limit(decision.delay_seconds)
                 time.sleep(decision.delay_seconds + random.uniform(0, 0.5))
                 continue
             raise CollectionError(
@@ -269,16 +296,46 @@ class GitHubClient:
         *,
         params: dict[str, Any] | None = None,
         resource: str = "core",
-    ) -> dict[str, Any]:
+        allow_not_found: bool = False,
+    ) -> dict[str, Any] | None:
         url = endpoint if endpoint.startswith("http") else f"https://api.github.com{endpoint}"
-        return self._request(
-            "GET", url, api="rest", resource=resource, endpoint=endpoint, params=params
+        result = self._request(
+            "GET",
+            url,
+            api="rest",
+            resource=resource,
+            endpoint=endpoint,
+            params=params,
+            allow_not_found=allow_not_found,
         )
+        return result if isinstance(result, dict) or result is None else None
+
+    def get_bytes(
+        self,
+        url: str,
+        *,
+        api: str = "raw",
+        resource: str = "raw",
+        endpoint: str | None = None,
+        allow_not_found: bool = False,
+        accept: str | None = None,
+    ) -> bytes | None:
+        result = self._request(
+            "GET",
+            url,
+            api=api,
+            resource=resource,
+            endpoint=endpoint or url,
+            response_kind="bytes",
+            allow_not_found=allow_not_found,
+            extra_headers={"Accept": accept} if accept else None,
+        )
+        return result if isinstance(result, bytes) or result is None else None
 
     def graphql(self, query: str) -> dict[str, Any]:
         if not self.authenticated:
             raise CollectionError("GraphQL enrichment requires GITHUB_TOKEN or GITHUB_TOKENS")
-        return self._request(
+        result = self._request(
             "POST",
             "https://api.github.com/graphql",
             api="graphql",
@@ -286,11 +343,26 @@ class GitHubClient:
             endpoint="graphql",
             json_body={"query": query},
         )
+        if not isinstance(result, dict):
+            raise TransientCollectionError("GraphQL returned an unexpected response type")
+        return result
+
+    def budget_snapshot(self) -> dict[str, dict[str, int | float | None]]:
+        return self.rate_limits.snapshot()
 
 
 def _int_header(headers: Mapping[str, str], name: str) -> int | None:
     value = headers.get(name)
     try:
         return int(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def _iso_epoch(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
