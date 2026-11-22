@@ -6,10 +6,15 @@ import sys
 from pathlib import Path
 
 from github_ecosystem_miner.association import mine_association_rules
+from github_ecosystem_miner.benchmark import benchmark_collection
 from github_ecosystem_miner.cleaning import clean_run
+from github_ecosystem_miner.clustering import cluster_repositories
 from github_ecosystem_miner.collection import collect_enrichment, collect_search
 from github_ecosystem_miner.config import load_config
 from github_ecosystem_miner.errors import MinerError
+from github_ecosystem_miner.github_client import GitHubClient
+from github_ecosystem_miner.reporting import export_run, generate_report
+from github_ecosystem_miner.robustness import analyze_robustness
 from github_ecosystem_miner.runs import create_run, list_runs, load_run
 from github_ecosystem_miner.storage import connect
 
@@ -45,6 +50,17 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--run-id", required=True)
     enrich = collect_commands.add_parser("enrich", help="Enrich repositories with batched GraphQL")
     enrich.add_argument("--run-id", required=True)
+    enrich.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Check current commit SHAs and reuse caches for unchanged files",
+    )
+
+    benchmark = commands.add_parser(
+        "benchmark-collection", help="Compare legacy REST, optimized REST, and hybrid collection"
+    )
+    benchmark.add_argument("--run-id", required=True)
+    benchmark.add_argument("--limit", type=int, help="Repositories to benchmark")
 
     clean = commands.add_parser("clean", help="Parse, normalize, and audit technology evidence")
     clean.add_argument("--run-id", required=True)
@@ -52,8 +68,23 @@ def build_parser() -> argparse.ArgumentParser:
     mine = commands.add_parser("mine-rules", help="Mine FP-Growth rules and technology communities")
     mine.add_argument("--run-id", required=True)
 
+    cluster = commands.add_parser("cluster", help="Discover and explain project families")
+    cluster.add_argument("--run-id", required=True)
+
+    robustness = commands.add_parser(
+        "robustness", help="Measure rule, cluster, sample, and cohort sensitivity"
+    )
+    robustness.add_argument("--run-id", required=True)
+
+    report = commands.add_parser("report", help="Generate a reproducible offline HTML report")
+    report.add_argument("--run-id", required=True)
+
+    export = commands.add_parser("export", help="Export recorded run tables")
+    export.add_argument("--run-id", required=True)
+    export.add_argument("--format", choices=("parquet", "csv"), default="parquet")
+
     pipeline = commands.add_parser(
-        "pipeline", help="Run search, enrichment, cleaning, and rule mining"
+        "pipeline", help="Run the complete collection, mining, analysis, and report workflow"
     )
     pipeline.add_argument("--run-id", help="Resume a run or create this explicit run ID")
     return parser
@@ -86,6 +117,12 @@ def _show_status(context) -> None:
             ).fetchone()[0],
             "substitute_pairs": connection.execute(
                 "SELECT COUNT(*) FROM technology_substitutes WHERE run_id = ?", [context.run_id]
+            ).fetchone()[0],
+            "clusters": connection.execute(
+                "SELECT COUNT(*) FROM cluster_profiles WHERE run_id = ?", [context.run_id]
+            ).fetchone()[0],
+            "robustness_checks": connection.execute(
+                "SELECT COUNT(*) FROM robustness_results WHERE run_id = ?", [context.run_id]
             ).fetchone()[0],
             "api_calls": connection.execute(
                 "SELECT COUNT(*) FROM api_calls WHERE run_id = ?", [context.run_id]
@@ -123,11 +160,26 @@ def execute(args: argparse.Namespace) -> int:
     elif args.command == "collect" and args.collect_command == "search":
         print(json.dumps({"repositories": collect_search(context)}, indent=2))
     elif args.command == "collect" and args.collect_command == "enrich":
-        print(json.dumps({"enriched": collect_enrichment(context)}, indent=2))
+        print(
+            json.dumps(
+                {"enriched": collect_enrichment(context, refresh=args.refresh)}, indent=2
+            )
+        )
     elif args.command == "clean":
         print(json.dumps(clean_run(context), indent=2))
     elif args.command == "mine-rules":
         print(json.dumps(mine_association_rules(context), indent=2))
+    elif args.command == "cluster":
+        print(json.dumps(cluster_repositories(context), indent=2))
+    elif args.command == "robustness":
+        print(json.dumps(analyze_robustness(context), indent=2))
+    elif args.command == "report":
+        print(json.dumps(generate_report(context), indent=2))
+    elif args.command == "export":
+        print(json.dumps(export_run(context, args.format), indent=2))
+    elif args.command == "benchmark-collection":
+        with GitHubClient.from_environment(context.config.collection) as client:
+            print(json.dumps(benchmark_collection(context, client, limit=args.limit), indent=2))
     elif args.command == "pipeline":
         results = {
             "run_id": run_id,
@@ -135,7 +187,11 @@ def execute(args: argparse.Namespace) -> int:
             "enriched": collect_enrichment(context),
             "cleaning": clean_run(context),
             "mining": mine_association_rules(context),
+            "clustering": cluster_repositories(context),
+            "robustness": analyze_robustness(context),
+            "report": generate_report(context),
         }
+        context.mark_complete()
         print(json.dumps(results, indent=2))
     return 0
 
