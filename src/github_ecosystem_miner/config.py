@@ -27,6 +27,21 @@ class CollectionConfig:
     request_timeout_seconds: float = 60.0
     max_retries: int = 6
     wait_for_rate_limit: bool = True
+    enrichment_strategy: str = "auto"
+    tree_recursive: bool = True
+    tree_fallback_max_calls: int = 50
+    tree_fallback_max_depth: int = 8
+    raw_file_max_bytes: int = 1_000_000
+    archive_mode: str = "never"
+    archive_file_threshold: int = 12
+    archive_max_repository_kb: int = 50_000
+    archive_max_download_bytes: int = 50_000_000
+    archive_max_extracted_bytes: int = 200_000_000
+    archive_max_files: int = 50_000
+    core_rate_reserve: int = 50
+    search_rate_reserve: int = 2
+    graphql_rate_reserve: int = 50
+    benchmark_repository_limit: int = 3
 
 
 @dataclass(frozen=True)
@@ -61,6 +76,26 @@ class MiningConfig:
 
 
 @dataclass(frozen=True)
+class ClusteringConfig:
+    minimum_clusters: int = 2
+    maximum_clusters: int = 8
+    svd_components: int = 20
+    owner_repository_cap: int = 5
+    minimum_technologies: int = 2
+    random_seed: int = 42
+    stability_seeds: tuple[int, ...] = (11, 23, 42, 71, 101)
+    representative_count: int = 5
+
+
+@dataclass(frozen=True)
+class RobustnessConfig:
+    bootstrap_iterations: int = 50
+    stable_rule_frequency: float = 0.70
+    star_quantile: float = 0.50
+    random_seed: int = 42
+
+
+@dataclass(frozen=True)
 class AppConfig:
     schema_version: int = 1
     ecosystem: EcosystemConfig = field(default_factory=EcosystemConfig)
@@ -68,6 +103,8 @@ class AppConfig:
     evidence: EvidenceConfig = field(default_factory=EvidenceConfig)
     cleaning: CleaningConfig = field(default_factory=CleaningConfig)
     mining: MiningConfig = field(default_factory=MiningConfig)
+    clustering: ClusteringConfig = field(default_factory=ClusteringConfig)
+    robustness: RobustnessConfig = field(default_factory=RobustnessConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -114,6 +151,7 @@ def load_config(path: str | Path) -> AppConfig:
             }
         )
         mining_data = _section(data, "mining")
+        clustering_data = _section(data, "clustering")
         config = AppConfig(
             schema_version=int(data.get("schema_version", 1)),
             ecosystem=ecosystem,
@@ -128,6 +166,17 @@ def load_config(path: str | Path) -> AppConfig:
                     ),
                 }
             ),
+            clustering=ClusteringConfig(
+                **{
+                    **clustering_data,
+                    "stability_seeds": tuple(
+                        clustering_data.get(
+                            "stability_seeds", ClusteringConfig.stability_seeds
+                        )
+                    ),
+                }
+            ),
+            robustness=RobustnessConfig(**_section(data, "robustness")),
         )
     except (TypeError, ValueError) as error:
         raise ConfigurationError(f"Invalid configuration value: {error}") from error
@@ -157,6 +206,28 @@ def validate_config(config: AppConfig) -> None:
         raise ConfigurationError("collection.graphql_batch_size must be between 1 and 50")
     if config.collection.max_repositories < 0:
         raise ConfigurationError("collection.max_repositories must not be negative")
+    if config.collection.enrichment_strategy not in {"auto", "optimized_rest", "hybrid"}:
+        raise ConfigurationError(
+            "collection.enrichment_strategy must be auto, optimized_rest, or hybrid"
+        )
+    if config.collection.archive_mode not in {"never", "auto", "always"}:
+        raise ConfigurationError("collection.archive_mode must be never, auto, or always")
+    for name in (
+        "tree_fallback_max_calls",
+        "tree_fallback_max_depth",
+        "raw_file_max_bytes",
+        "archive_file_threshold",
+        "archive_max_repository_kb",
+        "archive_max_download_bytes",
+        "archive_max_extracted_bytes",
+        "archive_max_files",
+        "benchmark_repository_limit",
+    ):
+        if getattr(config.collection, name) < 1:
+            raise ConfigurationError(f"collection.{name} must be at least 1")
+    for name in ("core_rate_reserve", "search_rate_reserve", "graphql_rate_reserve"):
+        if getattr(config.collection, name) < 0:
+            raise ConfigurationError(f"collection.{name} must not be negative")
     for name in ("minimum_language_share",):
         value = getattr(config.evidence, name)
         if not 0 <= value <= 1:
@@ -173,3 +244,21 @@ def validate_config(config: AppConfig) -> None:
         not 0 < threshold <= 1 for threshold in config.mining.support_grid
     ):
         raise ConfigurationError("mining.support_grid values must be in (0, 1]")
+    if config.clustering.minimum_clusters < 2:
+        raise ConfigurationError("clustering.minimum_clusters must be at least 2")
+    if config.clustering.maximum_clusters < config.clustering.minimum_clusters:
+        raise ConfigurationError(
+            "clustering.maximum_clusters must be >= clustering.minimum_clusters"
+        )
+    if config.clustering.svd_components < 2:
+        raise ConfigurationError("clustering.svd_components must be at least 2")
+    if config.clustering.owner_repository_cap < 1:
+        raise ConfigurationError("clustering.owner_repository_cap must be at least 1")
+    if not config.clustering.stability_seeds:
+        raise ConfigurationError("clustering.stability_seeds must not be empty")
+    if config.robustness.bootstrap_iterations < 1:
+        raise ConfigurationError("robustness.bootstrap_iterations must be at least 1")
+    if not 0 < config.robustness.stable_rule_frequency <= 1:
+        raise ConfigurationError("robustness.stable_rule_frequency must be in (0, 1]")
+    if not 0 < config.robustness.star_quantile < 1:
+        raise ConfigurationError("robustness.star_quantile must be in (0, 1)")

@@ -14,6 +14,21 @@ max_repositories = 0
 request_timeout_seconds = 60
 max_retries = 6
 wait_for_rate_limit = true
+enrichment_strategy = "auto"
+tree_recursive = true
+tree_fallback_max_calls = 50
+tree_fallback_max_depth = 8
+raw_file_max_bytes = 1000000
+archive_mode = "never"
+archive_file_threshold = 12
+archive_max_repository_kb = 50000
+archive_max_download_bytes = 50000000
+archive_max_extracted_bytes = 200000000
+archive_max_files = 50000
+core_rate_reserve = 50
+search_rate_reserve = 2
+graphql_rate_reserve = 50
+benchmark_repository_limit = 3
 
 [evidence]
 minimum_language_share = 0.05
@@ -39,3 +54,19 @@ redundancy_improvement = 0.05
 community_minimum_lift = 2.0
 random_seed = 42
 support_grid = [0.05, 0.03, 0.02, 0.015, 0.01]
+
+[clustering]
+minimum_clusters = 2
+maximum_clusters = 8
+svd_components = 20
+owner_repository_cap = 5
+minimum_technologies = 2
+random_seed = 42
+stability_seeds = [11, 23, 42, 71, 101]
+representative_count = 5
+
+[robustness]
+bootstrap_iterations = 50
+stable_rule_frequency = 0.70
+star_quantile = 0.50
+random_seed = 42
