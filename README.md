@@ -1,4 +1,4 @@
-# GitHub Ecosystem Miner
+# StackScope — GitHub Ecosystem Miner
 
 GitHub Ecosystem Miner collects a reproducible GitHub repository sample,
 extracts technology evidence, audits cleaning decisions, and mines association
@@ -10,13 +10,19 @@ for each run, and a single `gem` command-line interface.
 ## Features
 
 - Recursive star-range slicing beyond GitHub Search's 1,000-result limit
-- Batched GraphQL enrichment
-- Automatic retry, quota handling, and optional token rotation
+- Adaptive optimized-REST or batched GraphQL enrichment with REST fallback
+- Recursive Git Trees discovery, commit-pinned raw/blob retrieval, and safe optional archives
+- Persistent tree/file caching and resumable repository checkpoints in DuckDB
+- Separate REST core, REST search and GraphQL budgets with secondary-limit handling
 - Isolated runs protected by configuration fingerprints
 - Technology evidence from dependency files, repository tooling, and languages
 - Auditable parsing, normalization, filtering, and repository inclusion
 - FP-Growth association rules with threshold evaluation and redundancy pruning
 - Substitute detection and Louvain technology communities
+- Stable project-family clustering across binary, TF-IDF and category-aware evidence
+- K-Means, hierarchical and HDBSCAN comparison with explainable cluster profiles
+- Bootstrap, owner-bias, popularity-cohort and collected-snapshot robustness checks
+- Reproducible offline HTML reports and CSV/Parquet exports
 - Mocked end-to-end tests that do not use GitHub quota
 
 ## Project structure
@@ -27,19 +33,27 @@ github-ecosystem-miner/
 ├── data/runs/                  # generated run databases and manifests
 ├── src/github_ecosystem_miner/
 │   ├── association.py
+│   ├── benchmark.py
 │   ├── cleaning.py
+│   ├── clustering.py
 │   ├── cli.py
 │   ├── collection.py
 │   ├── config.py
 │   ├── errors.py
 │   ├── github_client.py
+│   ├── rate_limits.py
+│   ├── retrieval.py
 │   ├── normalization.py
 │   ├── parsers.py
+│   ├── reporting.py
+│   ├── robustness.py
 │   ├── runs.py
 │   └── storage.py
 ├── tests/
 ├── .env.example
 ├── config.toml
+├── docs/COLLECTION_ARCHITECTURE.md
+├── requirements.lock
 ├── IMPROVEMENT_ROADMAP.md
 └── pyproject.toml
 ```
@@ -88,6 +102,10 @@ GITHUB_TOKEN=github_pat_xxx
 
 Never commit `.env`.
 
+Important collection controls include `enrichment_strategy`, tree fallback bounds, file-size
+limits, quota reserves and archive safety limits. Archives are disabled by default because the live
+sample benchmark found selective retrieval more bandwidth-efficient.
+
 ## Running the pipeline
 
 Create an isolated run:
@@ -103,8 +121,29 @@ gem collect search --run-id <RUN_ID>
 gem collect enrich --run-id <RUN_ID>
 gem clean --run-id <RUN_ID>
 gem mine-rules --run-id <RUN_ID>
+gem cluster --run-id <RUN_ID>
+gem robustness --run-id <RUN_ID>
+gem report --run-id <RUN_ID>
 gem run status --run-id <RUN_ID>
 ```
+
+For an incremental update, check the repositories' current commit SHAs and reuse cached trees and
+blobs wherever identities are unchanged:
+
+```powershell
+gem collect enrich --run-id <RUN_ID> --refresh
+```
+
+Compare the three collection strategies on the same discovered repositories:
+
+```powershell
+gem benchmark-collection --run-id <RUN_ID> --limit 3
+```
+
+Results are saved in DuckDB. See
+[docs/COLLECTION_ARCHITECTURE.md](docs/COLLECTION_ARCHITECTURE.md) for the audit, fallback behavior,
+cache keys, archive safeguards and benchmark interpretation. The measured sample is recorded in
+[docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md).
 
 To create and execute a complete run:
 
@@ -121,6 +160,13 @@ ecosystem.duckdb    repositories, evidence, audits, API logs, and results
 
 An existing run refuses to resume when the active configuration has a different
 fingerprint.
+
+Export every available run table without GitHub access:
+
+```powershell
+gem export --run-id <RUN_ID> --format parquet
+gem export --run-id <RUN_ID> --format csv
+```
 
 ## Technology evidence
 
@@ -155,6 +201,24 @@ The mining stage stores:
 
 Thresholds are configured in the `[mining]` section of `config.toml`.
 
+## Project families and robustness
+
+`gem cluster` builds a sparse repository-by-technology matrix, applies an owner cap, compares three
+feature weightings and evaluates K-Means, hierarchical clustering and HDBSCAN where applicable.
+Selection considers silhouette, stability and cluster-size balance. Each family stores
+over-represented technologies, representative repositories and descriptive metadata.
+
+`gem robustness` measures rule bootstrap frequency, support-threshold sensitivity, owner-cap bias,
+high/medium-star agreement, cluster stability and technology prevalence across creation cohorts.
+When repeated collected commits exist, it also compares preserved evidence snapshots. Creation-time
+cohorts are explicitly labelled as current observations, not historical dependencies.
+
+## Reports
+
+`gem report` produces `data/runs/<RUN_ID>/report.html` entirely from the recorded DuckDB run. It
+includes collection cost, cleaning decisions, technologies, rules, project families, robustness,
+temporal caveats, limitations and the full reproducibility manifest.
+
 ## Tests and code quality
 
 ```powershell
@@ -166,7 +230,10 @@ The test suite uses mocked GitHub responses and temporary DuckDB databases. It
 does not require a token or network access. GitHub Actions runs the same checks
 on pushes and pull requests.
 
-## Roadmap
+## Documentation
 
-See [IMPROVEMENT_ROADMAP.md](IMPROVEMENT_ROADMAP.md). The next major capability
-is upgraded clustering and cluster interpretation.
+See [architecture](docs/ARCHITECTURE.md),
+[collection decisions](docs/COLLECTION_ARCHITECTURE.md),
+[benchmark results](docs/BENCHMARK_RESULTS.md), and
+[troubleshooting](docs/TROUBLESHOOTING.md). The original implementation roadmap is retained in
+[IMPROVEMENT_ROADMAP.md](IMPROVEMENT_ROADMAP.md) with completion status.

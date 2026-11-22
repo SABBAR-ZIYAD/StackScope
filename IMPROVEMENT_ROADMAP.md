@@ -47,11 +47,11 @@ The current project already has useful design choices that must not be lost:
 - [x] Step 6 — Collect rich technology evidence efficiently
 - [x] Step 7 — Build an auditable cleaning and normalization layer
 - [x] Step 8 — Upgrade association-rule and stack mining
-- [ ] Step 9 — Upgrade clustering and cluster interpretation
-- [ ] Step 10 — Add analytical robustness and temporal analysis
+- [x] Step 9 — Upgrade clustering and cluster interpretation
+- [x] Step 10 — Add analytical robustness and temporal analysis
 - [x] Step 11 — Expand tests, schemas, and continuous integration
-- [ ] Step 12 — Generate reports and an optional explorer
-- [ ] Step 13 — Optimize, package, and release the project
+- [x] Step 12 — Generate reports and an optional explorer
+- [x] Step 13 — Optimize, package, and prepare the project for release
 
 ---
 
@@ -690,8 +690,9 @@ or charts than another implementation. It is successful when it is:
 - **tested:** important failure modes and transformations are automated; and
 - **usable:** the CLI, documentation, and reports make the system approachable.
 
-## Immediate next action
+## Completion note
 
-Implement **Step 9: clustering and cluster interpretation**. The package and
-CLI migration are complete, and the mocked end-to-end test protects the Search
-→ GraphQL → cleaning → association-mining path.
+The implementation roadmap is complete in StackScope 1.0.0. The optional interactive explorer was
+not required because the offline HTML report fulfills the reporting deliverable. Publishing a Git
+tag or GitHub release remains a repository-owner action after the release commit is reviewed and
+pushed.
