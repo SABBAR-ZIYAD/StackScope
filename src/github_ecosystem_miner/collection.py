@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from github_ecosystem_miner.errors import CollectionError, TransientCollectionError
 from github_ecosystem_miner.github_client import GitHubClient
+from github_ecosystem_miner.retrieval import discover_tree, retrieve_relevant_files
 from github_ecosystem_miner.runs import RunContext
 from github_ecosystem_miner.storage import connect
 
@@ -28,13 +31,14 @@ def _api_logger(context: RunContext):
             connection.execute(
                 """
                 INSERT INTO api_calls
-                    (run_id, api, endpoint, status, duration_ms, attempt, token_index,
-                     remaining, reset_at, graphql_cost, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (run_id, api, resource, endpoint, status, duration_ms, attempt,
+                     token_index, remaining, reset_at, graphql_cost, bytes_transferred, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     context.run_id,
                     row["api"],
+                    row["resource"],
                     row["endpoint"],
                     row["status"],
                     row["duration_ms"],
@@ -43,6 +47,7 @@ def _api_logger(context: RunContext):
                     row["remaining"],
                     row["reset_at"],
                     row["graphql_cost"],
+                    row["bytes_transferred"],
                     row["error"],
                 ],
             )
@@ -95,6 +100,8 @@ def _collect_base_query(context: RunContext, client: GitHubClient, base_query: s
         count_body = client.rest_get(
             "/search/repositories", params={"q": query, "per_page": 1}, resource="search"
         )
+        if count_body is None:
+            raise CollectionError(f"Search count unexpectedly returned no data: {query}")
         total = int(count_body.get("total_count", 0))
         if count_body.get("incomplete_results"):
             raise CollectionError(f"GitHub returned incomplete results while counting: {query}")
@@ -154,6 +161,8 @@ def _fetch_slice(
             },
             resource="search",
         )
+        if body is None:
+            raise CollectionError(f"Search page {page} unexpectedly returned no data: {query}")
         if body.get("incomplete_results"):
             raise CollectionError(f"GitHub returned incomplete results for page {page}: {query}")
         items = body.get("items") or []
@@ -281,12 +290,12 @@ def _upsert_repository(connection, run_id: str, item: dict[str, Any], base_query
     )
 
 
-def build_enrichment_query(full_names: Iterable[str], dependency_files: Iterable[str]) -> str:
-    manifest_aliases = {f"manifest_{index}": path for index, path in enumerate(dependency_files)}
-    manifest_fields = "\n".join(
-        f'    {alias}: object(expression: "HEAD:{path}") {{ ... on Blob {{ text byteSize oid }} }}'
-        for alias, path in manifest_aliases.items()
-    )
+def build_enrichment_query(
+    full_names: Iterable[str], dependency_files: Iterable[str] = ()
+) -> str:
+    # dependency_files remains accepted for callers from pre-0.3 releases. File contents are
+    # deliberately no longer requested through GraphQL; the tree/blob retrieval layer owns them.
+    del dependency_files
     parts = []
     for index, full_name in enumerate(full_names):
         owner, name = full_name.split("/", 1)
@@ -294,22 +303,32 @@ def build_enrichment_query(full_names: Iterable[str], dependency_files: Iterable
             f"""  r{index}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{
     databaseId
     nameWithOwner
+    defaultBranchRef {{
+      target {{
+        ... on Commit {{ oid tree {{ oid }} }}
+      }}
+    }}
     languages(first: 100, orderBy: {{field: SIZE, direction: DESC}}) {{
       edges {{ size node {{ name }} }}
     }}
-    root: object(expression: "HEAD:") {{
-      ... on Tree {{ entries {{ name type }} }}
-    }}
-    workflows: object(expression: "HEAD:.github/workflows") {{
-      ... on Tree {{ entries {{ name type }} }}
-    }}
-{manifest_fields}
   }}"""
         )
     return "query {\n  rateLimit { cost remaining resetAt }\n" + "\n".join(parts) + "\n}"
 
 
-def collect_enrichment(context: RunContext, client: GitHubClient | None = None) -> int:
+@dataclass(frozen=True)
+class RepositorySnapshot:
+    repository_id: int
+    full_name: str
+    commit_sha: str
+    tree_sha: str
+    languages: dict[str, int]
+    source: str
+
+
+def collect_enrichment(
+    context: RunContext, client: GitHubClient | None = None, *, refresh: bool = False
+) -> int:
     context.update_stage("enrich", "running")
     owns_client = client is None
     active_client = client or GitHubClient.from_environment(
@@ -319,55 +338,62 @@ def collect_enrichment(context: RunContext, client: GitHubClient | None = None) 
         with connect(context.database_path, read_only=True) as connection:
             pending = connection.execute(
                 """
-                SELECT repository_id, full_name FROM repositories r
-                WHERE run_id = ? AND NOT EXISTS (
+                SELECT repository_id, full_name, default_branch, size_kb FROM repositories r
+                WHERE run_id = ? AND (? OR NOT EXISTS (
                     SELECT 1 FROM repository_enrichment e
                     WHERE e.run_id = r.run_id AND e.repository_id = r.repository_id
                       AND e.status IN ('ok', 'not_found')
-                )
+                ))
                 ORDER BY stars DESC, repository_id
                 """,
-                [context.run_id],
+                [context.run_id, refresh],
             ).fetchall()
+        strategy = _select_strategy(context, active_client, len(pending))
         batch_size = context.config.collection.graphql_batch_size
-        index = 0
-        while index < len(pending):
+        for index in range(0, len(pending), batch_size):
             chunk = pending[index : index + batch_size]
-            try:
-                body = active_client.graphql(
-                    build_enrichment_query(
-                        [row[1] for row in chunk], context.config.evidence.dependency_files
-                    )
-                )
-            except TransientCollectionError:
-                if batch_size == 1:
-                    repository_id, full_name = chunk[0]
-                    _save_enrichment_error(
-                        context, repository_id, full_name, "error", "Repeated GraphQL failure"
-                    )
-                    index += 1
-                else:
-                    batch_size = max(1, batch_size // 2)
-                continue
+            snapshots: dict[int, RepositorySnapshot] = {}
+            graphql_errors: dict[int, list[dict[str, Any]]] = {}
+            if strategy == "hybrid":
+                try:
+                    snapshots, graphql_errors = _graphql_snapshots(active_client, chunk)
+                except (CollectionError, TransientCollectionError):
+                    # A GraphQL outage must not stop a resumable run. REST is slower but complete.
+                    snapshots = {}
 
-            data = body.get("data") or {}
-            errors = body.get("errors") or []
-            for offset, (repository_id, full_name) in enumerate(chunk):
-                alias = f"r{offset}"
-                node = data.get(alias)
-                related_errors = [
-                    error for error in errors if (error.get("path") or [None])[0] == alias
-                ]
-                _save_enrichment(
-                    context,
-                    int(repository_id),
-                    full_name,
-                    node,
-                    related_errors,
-                )
-            index += len(chunk)
-            if batch_size < context.config.collection.graphql_batch_size:
-                batch_size = min(context.config.collection.graphql_batch_size, batch_size * 2)
+            for row in chunk:
+                repository_id, full_name, default_branch, size_kb = row
+                repository_id = int(repository_id)
+                snapshot = snapshots.get(repository_id)
+                if snapshot is None:
+                    try:
+                        snapshot = _rest_snapshot(
+                            active_client,
+                            repository_id,
+                            str(full_name),
+                            str(default_branch or "HEAD"),
+                        )
+                    except CollectionError as error:
+                        _save_enrichment_error(
+                            context,
+                            repository_id,
+                            str(full_name),
+                            "error",
+                            str(error),
+                            graphql_errors.get(repository_id),
+                        )
+                        continue
+                try:
+                    _enrich_snapshot(context, active_client, snapshot, int(size_kb or 0))
+                except CollectionError as error:
+                    _save_enrichment_error(
+                        context,
+                        repository_id,
+                        str(full_name),
+                        "error",
+                        str(error),
+                        graphql_errors.get(repository_id),
+                    )
 
         with connect(context.database_path, read_only=True) as connection:
             count = connection.execute(
@@ -384,71 +410,179 @@ def collect_enrichment(context: RunContext, client: GitHubClient | None = None) 
             active_client.close()
 
 
-def _save_enrichment(
-    context: RunContext,
-    repository_id: int,
-    full_name: str,
-    node: dict[str, Any] | None,
-    errors: list[dict[str, Any]],
-) -> None:
-    if node is None:
-        status = (
-            "not_found" if any(error.get("type") == "NOT_FOUND" for error in errors) else "error"
-        )
-        _save_enrichment_error(
-            context,
-            repository_id,
-            full_name,
-            status,
-            "; ".join(str(error.get("message", "GraphQL error")) for error in errors)
-            or "GraphQL returned no repository",
-            errors,
-        )
-        return
-    if node.get("databaseId") is not None and int(node["databaseId"]) != repository_id:
-        _save_enrichment_error(
-            context,
-            repository_id,
-            full_name,
-            "identity_mismatch",
-            f"GraphQL returned repository ID {node['databaseId']} for expected ID {repository_id}",
-            errors,
-        )
-        return
+def _select_strategy(context: RunContext, client: GitHubClient, pending_count: int) -> str:
+    configured = context.config.collection.enrichment_strategy
+    if configured == "auto":
+        return "hybrid" if client.authenticated and pending_count > 1 else "optimized_rest"
+    if configured == "hybrid" and not client.authenticated:
+        return "optimized_rest"
+    return configured
 
-    languages = {
-        edge["node"]["name"]: edge["size"]
-        for edge in (node.get("languages") or {}).get("edges", [])
-    }
-    root_files = [
-        [entry["name"], entry.get("type")] for entry in (node.get("root") or {}).get("entries", [])
-    ]
-    workflows = [entry["name"] for entry in (node.get("workflows") or {}).get("entries", [])]
-    manifests: dict[str, dict[str, Any] | None] = {}
-    for index, path in enumerate(context.config.evidence.dependency_files):
-        blob = node.get(f"manifest_{index}")
-        manifests[path] = (
-            {"text": blob.get("text"), "byte_size": blob.get("byteSize"), "oid": blob.get("oid")}
-            if blob
-            else None
+
+def _graphql_snapshots(
+    client: GitHubClient, rows: list[tuple[Any, ...]]
+) -> tuple[dict[int, RepositorySnapshot], dict[int, list[dict[str, Any]]]]:
+    body = client.graphql(build_enrichment_query([str(row[1]) for row in rows]))
+    data = body.get("data") or {}
+    errors = body.get("errors") or []
+    snapshots: dict[int, RepositorySnapshot] = {}
+    mapped_errors: dict[int, list[dict[str, Any]]] = {}
+    for offset, row in enumerate(rows):
+        repository_id, full_name = int(row[0]), str(row[1])
+        alias = f"r{offset}"
+        related = [error for error in errors if (error.get("path") or [None])[0] == alias]
+        if related:
+            mapped_errors[repository_id] = related
+        node = data.get(alias)
+        target = ((node or {}).get("defaultBranchRef") or {}).get("target") or {}
+        tree = target.get("tree") or {}
+        if not node or not target.get("oid") or not tree.get("oid"):
+            continue
+        if node.get("databaseId") is not None and int(node["databaseId"]) != repository_id:
+            continue
+        languages = {
+            edge["node"]["name"]: int(edge["size"])
+            for edge in (node.get("languages") or {}).get("edges", [])
+        }
+        snapshots[repository_id] = RepositorySnapshot(
+            repository_id,
+            full_name,
+            str(target["oid"]),
+            str(tree["oid"]),
+            languages,
+            "graphql",
         )
+    return snapshots, mapped_errors
+
+
+def _rest_snapshot(
+    client: GitHubClient, repository_id: int, full_name: str, default_branch: str
+) -> RepositorySnapshot:
+    commit = client.rest_get(
+        f"/repos/{full_name}/commits/{default_branch}", resource="core", allow_not_found=True
+    )
+    languages = client.rest_get(
+        f"/repos/{full_name}/languages", resource="core", allow_not_found=True
+    )
+    tree_sha = (((commit or {}).get("commit") or {}).get("tree") or {}).get("sha")
+    commit_sha = (commit or {}).get("sha")
+    if not commit_sha or not tree_sha:
+        raise CollectionError(f"Default-branch snapshot unavailable for {full_name}")
+    return RepositorySnapshot(
+        repository_id,
+        full_name,
+        str(commit_sha),
+        str(tree_sha),
+        {str(name): int(size) for name, size in (languages or {}).items()},
+        "rest",
+    )
+
+
+def _enrich_snapshot(
+    context: RunContext,
+    client: GitHubClient,
+    snapshot: RepositorySnapshot,
+    repository_size_kb: int,
+) -> None:
+    started = time.perf_counter()
+    with connect(context.database_path) as connection:
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO repository_snapshots
+                (run_id, repository_id, commit_sha, tree_sha, languages_json, source)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                context.run_id,
+                snapshot.repository_id,
+                snapshot.commit_sha,
+                snapshot.tree_sha,
+                json.dumps(snapshot.languages, sort_keys=True),
+                snapshot.source,
+            ],
+        )
+    tree = discover_tree(
+        context.database_path,
+        client,
+        repository_id=snapshot.repository_id,
+        full_name=snapshot.full_name,
+        commit_sha=snapshot.commit_sha,
+        tree_sha=snapshot.tree_sha,
+        config=context.config.collection,
+    )
+    retrieval = retrieve_relevant_files(
+        context.database_path,
+        client,
+        repository_id=snapshot.repository_id,
+        full_name=snapshot.full_name,
+        commit_sha=snapshot.commit_sha,
+        repository_size_kb=repository_size_kb,
+        entries=tree.entries,
+        dependency_files=context.config.evidence.dependency_files,
+        config=context.config.collection,
+    )
+    root_files = [[entry.path, entry.type] for entry in tree.entries]
+    workflows = [
+        entry.path
+        for entry in tree.entries
+        if entry.type == "blob" and entry.path.lower().startswith(".github/workflows/")
+    ]
+    dependency_names = {
+        path.rsplit("/", 1)[-1].lower() for path in context.config.evidence.dependency_files
+    }
+    manifests: dict[str, dict[str, Any] | None] = {}
+    for file in retrieval.files:
+        if file.path.rsplit("/", 1)[-1].lower() in dependency_names:
+            manifests[file.path] = {
+                "text": file.content.decode("utf-8", errors="replace"),
+                "byte_size": len(file.content),
+                "oid": file.blob_sha,
+                "source": file.source,
+            }
+    strategy = f"{snapshot.source}+{retrieval.strategy}"
+    duration_ms = (time.perf_counter() - started) * 1000
     with connect(context.database_path) as connection:
         connection.execute(
             """
             INSERT OR REPLACE INTO repository_enrichment
-                (run_id, repository_id, full_name, status, languages_json, root_files_json,
-                 workflows_json, manifests_json, graphql_errors_json, error_message)
-            VALUES (?, ?, ?, 'ok', ?, ?, ?, ?, ?, NULL)
+                (run_id, repository_id, full_name, status, commit_sha, tree_sha,
+                 retrieval_strategy, languages_json, root_files_json, workflows_json,
+                 manifests_json, graphql_errors_json, error_message)
+            VALUES (?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?, '[]', NULL)
             """,
             [
                 context.run_id,
-                repository_id,
-                full_name,
-                json.dumps(languages, sort_keys=True),
+                snapshot.repository_id,
+                snapshot.full_name,
+                snapshot.commit_sha,
+                snapshot.tree_sha,
+                strategy,
+                json.dumps(snapshot.languages, sort_keys=True),
                 json.dumps(root_files),
                 json.dumps(workflows),
                 json.dumps(manifests, sort_keys=True),
-                json.dumps(errors),
+            ],
+        )
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO enrichment_metrics
+                (run_id, repository_id, commit_sha, strategy, tree_requests,
+                 file_requests, cache_hits, bytes_transferred, archive_used,
+                 relevant_files, duration_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                context.run_id,
+                snapshot.repository_id,
+                snapshot.commit_sha,
+                strategy,
+                tree.api_requests,
+                retrieval.file_requests,
+                retrieval.cache_hits + int(tree.cache_hit),
+                tree.bytes_transferred + retrieval.bytes_transferred,
+                retrieval.archive_used,
+                len(retrieval.files),
+                duration_ms,
             ],
         )
 
