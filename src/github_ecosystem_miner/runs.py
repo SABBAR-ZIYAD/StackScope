@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import importlib.metadata
 import json
 import platform
 import subprocess
@@ -29,6 +31,25 @@ def _git_commit(project_root: Path) -> str | None:
     except (OSError, subprocess.CalledProcessError):
         return None
     return result.stdout.strip() or None
+
+
+def _dependency_versions() -> dict[str, str]:
+    packages = (
+        "duckdb",
+        "httpx",
+        "mlxtend",
+        "networkx",
+        "pandas",
+        "scikit-learn",
+        "scipy",
+    )
+    versions = {}
+    for package in packages:
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = "not-installed"
+    return versions
 
 
 @dataclass(frozen=True)
@@ -92,6 +113,24 @@ class RunContext:
         temporary.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         temporary.replace(self.manifest_path)
 
+    def mark_complete(self) -> None:
+        completed_at = utc_now()
+        with connect(self.database_path) as connection:
+            connection.execute(
+                "UPDATE runs SET status = 'complete', updated_at = ? WHERE run_id = ?",
+                [completed_at, self.run_id],
+            )
+        digest = hashlib.sha256()
+        with self.database_path.open("rb") as database:
+            for chunk in iter(lambda: database.read(1024 * 1024), b""):
+                digest.update(chunk)
+        manifest = self.read_manifest()
+        manifest["status"] = "complete"
+        manifest["completed_at"] = completed_at
+        manifest["updated_at"] = completed_at
+        manifest.setdefault("artifacts", {})["database_sha256"] = digest.hexdigest()
+        self.write_manifest(manifest)
+
 
 def create_run(
     project_root: str | Path, config: AppConfig, run_id: str | None = None
@@ -117,6 +156,13 @@ def create_run(
         "config": config.to_dict(),
         "git_commit": _git_commit(root),
         "python_version": platform.python_version(),
+        "dependency_versions": _dependency_versions(),
+        "github_api_version": "2022-11-28",
+        "random_seeds": {
+            "mining": config.mining.random_seed,
+            "clustering": config.clustering.random_seed,
+            "robustness": config.robustness.random_seed,
+        },
         "artifacts": {"database": "ecosystem.duckdb"},
         "stages": {},
     }

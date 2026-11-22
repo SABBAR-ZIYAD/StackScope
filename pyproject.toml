@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "github-ecosystem-miner"
-version = "0.2.0"
+version = "1.0.0"
 description = "Reproducible collection and mining of GitHub technology ecosystems"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,6 +21,9 @@ dependencies = [
 
 [project.scripts]
 gem = "github_ecosystem_miner.cli:main"
+
+[project.optional-dependencies]
+dev = ["build>=1.2", "ruff>=0.17"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

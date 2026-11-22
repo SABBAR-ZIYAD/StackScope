@@ -1,0 +1,7 @@
+include CHANGELOG.md
+include CONTRIBUTING.md
+include IMPROVEMENT_ROADMAP.md
+include REFACTOR_PLAN.md
+include config.toml
+include requirements.lock
+recursive-include docs *.md
