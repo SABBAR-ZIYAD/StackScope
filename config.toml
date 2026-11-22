@@ -1,0 +1,41 @@
+schema_version = 1
+
+[ecosystem]
+queries = ["topic:webapp fork:false archived:false"]
+minimum_stars = 0
+maximum_stars = 1000000
+
+[collection]
+search_per_page = 100
+search_max_results = 1000
+search_interval_seconds = 2.1
+graphql_batch_size = 20
+max_repositories = 0
+request_timeout_seconds = 60
+max_retries = 6
+wait_for_rate_limit = true
+
+[evidence]
+minimum_language_share = 0.05
+dependency_files = [
+  "requirements.txt",
+  "pyproject.toml",
+  "setup.py",
+  "setup.cfg",
+  "environment.yml",
+]
+
+[cleaning]
+minimum_packages = 2
+exclude_resource_repositories = true
+
+[mining]
+minimum_item_support = 0.01
+minimum_support = 0.02
+minimum_confidence = 0.50
+minimum_lift = 1.50
+maximum_itemset_length = 4
+redundancy_improvement = 0.05
+community_minimum_lift = 2.0
+random_seed = 42
+support_grid = [0.05, 0.03, 0.02, 0.015, 0.01]

@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+
+# Secrets
+.env
+
+# Python generated files
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Run-isolated databases, manifests, and exports
+data/runs/*
+!data/runs/.gitkeep
+
+# Local package/build artifacts
+*.duckdb
+*.duckdb.wal
+*.egg-info/
+build/
+dist/
