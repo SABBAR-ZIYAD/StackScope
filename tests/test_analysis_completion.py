@@ -106,7 +106,10 @@ class TestCompletedAnalysis(unittest.TestCase):
             self.assertEqual(robustness["repositories"], 12)
             report = generate_report(context)
             self.assertTrue(Path(report["path"]).exists())
-            self.assertIn("StackScope", Path(report["path"]).read_text(encoding="utf-8"))
+            self.assertIn(
+                "GitHub Ecosystem Miner",
+                Path(report["path"]).read_text(encoding="utf-8"),
+            )
             exported = export_run(context, "parquet")
             self.assertGreater(len(exported["tables"]), 5)
             self.assertTrue(all(Path(item["path"]).exists() for item in exported["tables"]))

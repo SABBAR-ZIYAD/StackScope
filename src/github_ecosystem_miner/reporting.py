@@ -214,7 +214,7 @@ def _render_report(context: RunContext, data: dict[str, object]) -> str:
     ]
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>StackScope report — {html.escape(context.run_id)}</title>
+<title>GitHub Ecosystem Miner report — {html.escape(context.run_id)}</title>
 <style>
 body{{font:15px/1.5 system-ui,sans-serif;max-width:1100px;margin:auto;padding:32px;color:#172033}}
 h1,h2{{color:#0f172a}} .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px}}
@@ -222,7 +222,7 @@ h1,h2{{color:#0f172a}} .cards{{display:grid;grid-template-columns:repeat(auto-fi
 table{{border-collapse:collapse;width:100%;margin:12px 0 28px}}th,td{{border-bottom:1px solid #ddd;padding:8px;text-align:left}}
 article{{border-left:4px solid #6366f1;padding:4px 16px;margin:18px 0}}img{{max-width:100%;height:auto}}code,pre{{white-space:pre-wrap}}
 </style></head><body>
-<h1>StackScope: GitHub technology ecosystem</h1>
+<h1>GitHub Ecosystem Miner: technology ecosystem report</h1>
 <p>Run <code>{html.escape(context.run_id)}</code>, generated {html.escape(utc_now())}.</p>
 <div class="cards">{cards}</div>
 <h2>Collection scope and API cost</h2>{_table(('API','Budget','Requests','Bytes','GraphQL points','Limit responses'), data['api'])}

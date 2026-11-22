@@ -91,7 +91,7 @@ class GitHubClient:
             headers={
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "stackscope/0.3",
+                "User-Agent": "github-ecosystem-miner/1.0",
             },
         )
         self.last_search_request = 0.0

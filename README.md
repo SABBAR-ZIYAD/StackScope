@@ -1,4 +1,4 @@
-# StackScope — GitHub Ecosystem Miner
+# GitHub Ecosystem Miner
 
 GitHub Ecosystem Miner collects a reproducible GitHub repository sample,
 extracts technology evidence, audits cleaning decisions, and mines association

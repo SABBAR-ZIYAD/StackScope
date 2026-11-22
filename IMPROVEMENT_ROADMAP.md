@@ -692,7 +692,7 @@ or charts than another implementation. It is successful when it is:
 
 ## Completion note
 
-The implementation roadmap is complete in StackScope 1.0.0. The optional interactive explorer was
+The implementation roadmap is complete in GitHub Ecosystem Miner 1.0.0. The optional interactive explorer was
 not required because the offline HTML report fulfills the reporting deliverable. Publishing a Git
 tag or GitHub release remains a repository-owner action after the release commit is reviewed and
 pushed.

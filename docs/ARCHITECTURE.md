@@ -1,6 +1,6 @@
 # Architecture
 
-StackScope is a run-isolated pipeline:
+GitHub Ecosystem Miner is a run-isolated pipeline:
 
 ```text
 REST Search → snapshot enrichment → Git Trees/files → evidence/cleaning

@@ -396,7 +396,7 @@ def _write_diagnostic_svg(
         '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="580" '
         'viewBox="0 0 800 580"><rect width="100%" height="100%" fill="white"/>'
         '<text x="20" y="24" font-family="sans-serif" font-size="16">'
-        f"StackScope project families — {selected.method}, {selected.weighting}</text>"
+        f"GitHub Ecosystem Miner project families — {selected.method}, {selected.weighting}</text>"
         + "".join(circles)
         + "</svg>"
     )

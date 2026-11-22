@@ -105,7 +105,7 @@ def _run_strategy(
     analyzed = 0
     started = time.perf_counter()
     try:
-        with tempfile.TemporaryDirectory(prefix="stackscope-benchmark-") as directory:
+        with tempfile.TemporaryDirectory(prefix="github-ecosystem-miner-benchmark-") as directory:
             database_path = Path(directory) / "cache.duckdb"
             initialize_database(database_path)
             if strategy == "existing_rest_only":

@@ -1,4 +1,4 @@
-# Direct runtime and development dependencies validated for StackScope 1.0.0.
+# Direct runtime and development dependencies validated for GitHub Ecosystem Miner 1.0.0.
 # Install the package normally; use this file as a reproducibility constraint.
 build==1.6.1
 duckdb==2.0.0

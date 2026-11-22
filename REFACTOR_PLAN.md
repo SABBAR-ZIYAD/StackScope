@@ -1,4 +1,4 @@
-# StackScope Collection Refactor Plan
+# GitHub Ecosystem Miner Collection Refactor Plan
 
 ## What already works
 
