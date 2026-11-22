@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
 from github_ecosystem_miner.normalization import normalize_package
@@ -100,6 +101,13 @@ def clean_run(context: RunContext) -> dict[str, int]:
                     manifests,
                     minimum_language_share=context.config.evidence.minimum_language_share,
                 )
+                snapshot = connection.execute(
+                    """
+                    SELECT commit_sha FROM repository_enrichment
+                    WHERE run_id = ? AND repository_id = ? AND status = 'ok'
+                    """,
+                    [context.run_id, repository_id],
+                ).fetchone()
                 for item in evidence:
                     connection.execute(
                         """
@@ -119,6 +127,24 @@ def clean_run(context: RunContext) -> dict[str, int]:
                             item.directness,
                         ],
                     )
+                    if snapshot and snapshot[0]:
+                        connection.execute(
+                            """
+                            INSERT OR REPLACE INTO technology_evidence_snapshots
+                                (run_id, repository_id, commit_sha, technology,
+                                 category, source, confidence)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            [
+                                context.run_id,
+                                repository_id,
+                                snapshot[0],
+                                item.technology,
+                                item.category,
+                                item.source,
+                                item.confidence,
+                            ],
+                        )
                 for source, raw_value, normalized, action, reason in audit:
                     connection.execute(
                         """
@@ -206,15 +232,16 @@ def extract_evidence(
                 ("github_languages", language, technology, "dropped", "below_share_threshold")
             )
 
-    root_names = {entry[0].lower() for entry in root_files if entry}
-    for root_name in sorted(root_names):
+    root_paths = {entry[0].lower() for entry in root_files if entry}
+    for root_path in sorted(root_paths):
+        root_name = PurePosixPath(root_path).name
         technology = TOOLING_FILES.get(root_name)
         if technology:
             evidence.append(
                 Evidence(technology, "tooling", "root_files", root_name, 1.0, "observed")
             )
             audit.append(("root_files", root_name, technology, "accepted", "tooling_marker"))
-        if root_name.endswith(".tf"):
+        if root_path.endswith(".tf"):
             evidence.append(
                 Evidence("terraform", "tooling", "root_files", root_name, 1.0, "observed")
             )
@@ -230,12 +257,13 @@ def extract_evidence(
     for path, blob in manifests.items():
         if not blob or not isinstance(blob.get("text"), str):
             continue
-        parser = PARSERS.get(path.lower())
+        manifest_name = PurePosixPath(path.lower()).name
+        parser = PARSERS.get(manifest_name)
         if parser is None:
             audit.append((path, path, None, "unsupported", "no_parser"))
             continue
         text = blob["text"]
-        frozen = path.lower() == "requirements.txt" and looks_frozen_requirements(text)
+        frozen = manifest_name == "requirements.txt" and looks_frozen_requirements(text)
         for raw_name in parser(text):
             normalized, reason = normalize_package(raw_name)
             if normalized is None:
